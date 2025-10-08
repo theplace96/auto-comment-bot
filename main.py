@@ -125,7 +125,7 @@ def crawl_naver_ai_answer(keyword):
     url = f"https://search.naver.com/search.naver?query={keyword}"
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+            browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
             page = browser.new_page()
             page.goto(url, timeout=15000)
 
@@ -267,3 +267,4 @@ if __name__ == "__main__":
 
     for t in threads:
         t.join()
+
