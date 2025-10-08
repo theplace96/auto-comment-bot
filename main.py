@@ -3,81 +3,76 @@ import base64
 import time
 import threading
 import os
+from playwright.sync_api import sync_playwright
 
-CATEGORY_ACCOUNTS = {
-    11: {"username": "happyfox49", "password": "happyfox49"},  # 생활정보 커뮤니티
-    22: {"username": "coolbear95", "password": "coolbear95"},  # 대출 커뮤니티
-    23: {"username": "bravefox28", "password": "bravefox28"},  # 세금 커뮤니티
-    24: {"username": "mightymonkey56", "password": "mightymonkey56"}  # 지원금 커뮤니티
-}
-
+# ==========================
+# 환경 변수 설정
+# ==========================
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 WP_URL = os.getenv("WP_URL")
 
-comment_lock = threading.Lock()  # 댓글 작성 락 생성
+CATEGORY_ACCOUNTS = {
+    11: {"username": "happyfox49", "password": "happyfox49"},  # 생활정보
+    22: {"username": "coolbear95", "password": "coolbear95"},  # 대출
+    23: {"username": "bravefox28", "password": "bravefox28"},  # 세금
+    24: {"username": "mightymonkey56", "password": "mightymonkey56"}  # 지원금
+}
 
+comment_lock = threading.Lock()
+
+
+# ==========================
+# 워드프레스 인증 및 데이터 처리
+# ==========================
 def get_auth_headers(username, password):
-    credentials = f"{username}:{password}"
-    token = base64.b64encode(credentials.encode()).decode()
-    return {
-        "Authorization": f"Basic {token}"
-    }
+    token = base64.b64encode(f"{username}:{password}".encode()).decode()
+    return {"Authorization": f"Basic {token}"}
+
 
 def get_posts_by_category(category_id, username, password):
     url = f"{WP_URL}/wp-json/wp/v2/posts?categories={category_id}&per_page=1"
-    headers = get_auth_headers(username, password)
-    res = requests.get(url, headers=headers)
+    res = requests.get(url, headers=get_auth_headers(username, password))
     if res.status_code == 200:
         try:
             return res.json()
-        except Exception as e:
-            print(f"응답 JSON 변환 실패: {e}")
+        except:
             return []
-    else:
-        print(f"워드프레스 글 불러오기 실패, 상태 코드: {res.status_code}, 내용: {res.text}")
-        return []
+    return []
+
 
 def get_existing_comments(post_id, username, password):
     url = f"{WP_URL}/wp-json/wp/v2/comments?post={post_id}&per_page=100"
-    headers = get_auth_headers(username, password)
-    res = requests.get(url, headers=headers)
+    res = requests.get(url, headers=get_auth_headers(username, password))
     if res.status_code == 200:
         try:
             return res.json()
-        except Exception as e:
-            print(f"댓글 JSON 변환 실패: {e}")
+        except:
             return []
-    else:
-        print(f"댓글 불러오기 실패: 상태 코드 {res.status_code}, 내용: {res.text}")
-        return []
+    return []
+
 
 def has_user_commented(post_id, username, password):
     comments = get_existing_comments(post_id, username, password)
-    for comment in comments:
-        author_name = comment.get("author_name", "")
-        if author_name.lower() == username.lower():
+    for c in comments:
+        if c.get("author_name", "").lower() == username.lower():
             return True
     return False
 
-def generate_comment(title, content):
-    prompt = f"""
-게시글 제목
-{title}
 
-내용
-{content}
+def post_comment(post_id, comment_text, username, password):
+    url = f"{WP_URL}/wp-json/wp/v2/comments"
+    headers = get_auth_headers(username, password)
+    headers["Content-Type"] = "application/json"
+    data = {"post": post_id, "content": comment_text}
+    res = requests.post(url, headers=headers, json=data)
+    return res.status_code == 201
 
-이 글에 사람이 댓글 다는 것처럼 친근한 말투를 섞어서 근거와 이유 및 추가정보를 붙여서 실제 정보를 한 문장으로 말해줘
 
-반드시 지켜야 할 조건은 다음과 같아
-- 참고해보세요, 도움이 되었으면 좋겠어요, 검토해보세요 이런 당연하고 추상적인 말 절대 쓰지 마
-- 근거와 이유를 토대로 실제 정보를 확신 있게 말해
-- 답변시 질문자가 믿고 확신할 수 있도록 이유과 근거를 함께 말해
-- 애매한 표현 없이 말해
-- 한 문장으로 끝내
-"""
-
-    res = requests.post(
+# ==========================
+# GPT API
+# ==========================
+def gpt(prompt):
+    r = requests.post(
         "https://api.openai.com/v1/chat/completions",
         headers={
             "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -89,46 +84,141 @@ def generate_comment(title, content):
             "temperature": 0.8
         }
     )
-
-    if res.status_code == 200:
-        comment = res.json()["choices"][0]["message"]["content"].strip()
-        # 따옴표로 감싸져 있을 경우 제거
-        if (comment.startswith('"') and comment.endswith('"')) or (comment.startswith("'") and comment.endswith("'")):
-            comment = comment[1:-1].strip()
-        return comment
+    if r.status_code == 200:
+        return r.json()["choices"][0]["message"]["content"].strip()
     else:
-        print(f"OpenAI API 오류: {res.status_code}, 내용: {res.text}")
-        return "댓글 생성에 실패했습니다."
+        print(f"❌ GPT 오류: {r.status_code}, {r.text}")
+        return None
 
 
-def post_comment(post_id, comment_text, username, password):
-    url = f"{WP_URL}/wp-json/wp/v2/comments"
-    headers = get_auth_headers(username, password)
-    headers["Content-Type"] = "application/json"
-    data = {
-        "post": post_id,
-        "content": comment_text
-    }
-    res = requests.post(url, headers=headers, json=data)
-    if res.status_code == 201:
-        return True
-    else:
-        print(f"댓글 작성 실패: 상태 코드 {res.status_code}, 내용: {res.text}")
-        return False
+# ==========================
+# 질문 문장 생성
+# ==========================
+def make_question_from_post(title, content):
+    prompt = f"""
+다음 글의 제목과 내용을 참고해서, 네이버 검색에 입력했을 때 AI 검색결과가 잘 나올법한 질문문장을 한 문장으로 만들어줘.
+답변 없이 질문문장만 출력해.
+제목: {title}
+내용: {content}
+"""
+    return gpt(prompt)
 
+
+# ==========================
+# 질문 문장 변형 (AI 안 나올 때)
+# ==========================
+def reformulate_question(original_question, attempt):
+    prompt = f"""
+다음 질문을 네이버 AI 검색결과가 잘 나올 수 있게 다른 방식으로 다시 표현해줘.
+질문의 의미는 그대로 유지해.
+질문만 한 줄로 출력해.
+원래 질문: {original_question}
+시도 횟수: {attempt}
+"""
+    return gpt(prompt)
+
+
+# ==========================
+# 네이버 AI 검색 크롤링
+# ==========================
+def crawl_naver_ai_answer(keyword):
+    url = f"https://search.naver.com/search.naver?query={keyword}"
+    try:
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, timeout=15000)
+
+            ai_div_selector = "div.R_zhtndIdtnrHycLbDdg._slog_visible"
+
+            try:
+                page.wait_for_selector(ai_div_selector, timeout=10000)
+            except:
+                browser.close()
+                return None
+
+            try:
+                more_btn = page.query_selector(f"{ai_div_selector} >> button:has-text(\"더보기\")")
+                if more_btn:
+                    more_btn.click()
+            except:
+                pass
+
+            time.sleep(5)
+
+            ai_div = page.query_selector(ai_div_selector)
+            if not ai_div:
+                browser.close()
+                return None
+
+            page.evaluate("""
+            (element) => {
+                element.querySelectorAll('a').forEach(a => a.remove());
+                element.querySelectorAll('br').forEach(br => br.replaceWith('\\n'));
+            }
+            """, ai_div)
+
+            text = page.evaluate("""
+            (element) => {
+                function getText(node) {
+                    if(node.nodeType === Node.TEXT_NODE) return node.textContent;
+                    return Array.from(node.childNodes).map(getText).join('');
+                }
+                return getText(element).replace(/\\n+/g, '\\n').trim();
+            }
+            """, ai_div)
+
+            browser.close()
+            return text if text else None
+    except Exception as e:
+        print(f"❌ 네이버 크롤링 오류: {e}")
+        return None
+
+
+# ==========================
+# AI 검색 결과 반복 시도
+# ==========================
+def get_ai_search_result_with_retries(initial_question, max_attempts=5):
+    question = initial_question
+    for attempt in range(1, max_attempts + 1):
+        print(f"🔄 네이버 AI 검색 시도 {attempt}: {question}")
+        result = crawl_naver_ai_answer(question)
+        if result:
+            return question, result
+        question = reformulate_question(question, attempt)
+        if not question:
+            break
+        time.sleep(2)
+    return None, None
+
+
+# ==========================
+# GPT로 댓글 문장 다듬기
+# ==========================
+def polish_answer_with_gpt(question, ai_text):
+    prompt = f"""
+다음은 네이버 AI 검색 결과입니다.
+이 내용을 바탕으로, 질문에 대해 사람이 댓글로 한 문장으로 확신있게 답하는 형식으로 정리해줘.
+추상적인 표현은 쓰지 말고, 정보와 이유를 같이 제시해.
+질문: {question}
+AI 결과: {ai_text}
+"""
+    return gpt(prompt)
+
+
+# ==========================
+# 카테고리별 봇 실행
+# ==========================
 def run_bot_for_category(category_id):
     account = CATEGORY_ACCOUNTS.get(category_id)
     if not account:
-        print(f"❌ 계정 없음: 카테고리 {category_id}")
         return
 
-    print(f"실시간 댓글 봇 시작 - 카테고리 {category_id}")
+    print(f"🚀 카테고리 {category_id} 댓글봇 시작")
 
     while True:
         posts = get_posts_by_category(category_id, account["username"], account["password"])
-
         if not isinstance(posts, list):
-            print("❌ 글 목록이 리스트 형태가 아닙니다. API 응답 확인 필요.")
             time.sleep(60)
             continue
 
@@ -143,24 +233,37 @@ def run_bot_for_category(category_id):
             if has_user_commented(post_id, account["username"], account["password"]):
                 continue
 
-            print(f"🔍 새 글 발견: {title}")
+            print(f"📝 새 글 발견: {title}")
 
-            with comment_lock:  # 락 획득 후 댓글 작성 시작
-                print("댓글 작성 전 30초 대기 중...")
-                time.sleep(30)  # 댓글 달기 전에 30초 대기
-                comment = generate_comment(title, content)
+            with comment_lock:
+                time.sleep(5)
+
+                q = make_question_from_post(title, content)
+                if not q:
+                    continue
+
+                final_q, ai_text = get_ai_search_result_with_retries(q)
+                if not ai_text:
+                    continue
+
+                comment = polish_answer_with_gpt(final_q, ai_text)
+                if not comment:
+                    continue
+
                 if post_comment(post_id, comment, account["username"], account["password"]):
-                    print(f"✅ 댓글 작성 성공 by {account['username']}")
-                    time.sleep(10)  # 댓글 작성 후 10초 텀 유지
-                else:
-                    print(f"⚠️ 댓글 실패")
+                    print(f"✅ 댓글 작성 성공: {comment}")
+                    time.sleep(10)
 
+
+# ==========================
+# 메인 실행
+# ==========================
 if __name__ == "__main__":
     threads = []
     for cat_id in CATEGORY_ACCOUNTS.keys():
-        thread = threading.Thread(target=run_bot_for_category, args=(cat_id,))
-        thread.start()
-        threads.append(thread)
+        t = threading.Thread(target=run_bot_for_category, args=(cat_id,))
+        t.start()
+        threads.append(t)
 
-    for thread in threads:
-        thread.join()
+    for t in threads:
+        t.join()
