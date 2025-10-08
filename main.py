@@ -3,7 +3,7 @@ import base64
 import time
 import threading
 import os
-from playwright.sync_api import sync_playwright
+from bs4 import BeautifulSoup  # Playwright 대신 BeautifulSoup 사용
 
 # ==========================
 # 환경 변수 설정
@@ -12,14 +12,13 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 WP_URL = os.getenv("WP_URL")
 
 CATEGORY_ACCOUNTS = {
-    11: {"username": "happyfox49", "password": "happyfox49"},  # 생활정보
-    22: {"username": "coolbear95", "password": "coolbear95"},  # 대출
-    23: {"username": "bravefox28", "password": "bravefox28"},  # 세금
-    24: {"username": "mightymonkey56", "password": "mightymonkey56"}  # 지원금
+    11: {"username": "happyfox49", "password": "happyfox49"},
+    22: {"username": "coolbear95", "password": "coolbear95"},
+    23: {"username": "bravefox28", "password": "bravefox28"},
+    24: {"username": "mightymonkey56", "password": "mightymonkey56"}
 }
 
 comment_lock = threading.Lock()
-
 
 # ==========================
 # 워드프레스 인증 및 데이터 처리
@@ -27,7 +26,6 @@ comment_lock = threading.Lock()
 def get_auth_headers(username, password):
     token = base64.b64encode(f"{username}:{password}".encode()).decode()
     return {"Authorization": f"Basic {token}"}
-
 
 def get_posts_by_category(category_id, username, password):
     url = f"{WP_URL}/wp-json/wp/v2/posts?categories={category_id}&per_page=1"
@@ -39,7 +37,6 @@ def get_posts_by_category(category_id, username, password):
             return []
     return []
 
-
 def get_existing_comments(post_id, username, password):
     url = f"{WP_URL}/wp-json/wp/v2/comments?post={post_id}&per_page=100"
     res = requests.get(url, headers=get_auth_headers(username, password))
@@ -50,14 +47,12 @@ def get_existing_comments(post_id, username, password):
             return []
     return []
 
-
 def has_user_commented(post_id, username, password):
     comments = get_existing_comments(post_id, username, password)
     for c in comments:
         if c.get("author_name", "").lower() == username.lower():
             return True
     return False
-
 
 def post_comment(post_id, comment_text, username, password):
     url = f"{WP_URL}/wp-json/wp/v2/comments"
@@ -66,7 +61,6 @@ def post_comment(post_id, comment_text, username, password):
     data = {"post": post_id, "content": comment_text}
     res = requests.post(url, headers=headers, json=data)
     return res.status_code == 201
-
 
 # ==========================
 # GPT API
@@ -90,9 +84,8 @@ def gpt(prompt):
         print(f"❌ GPT 오류: {r.status_code}, {r.text}")
         return None
 
-
 # ==========================
-# 질문 문장 생성
+# 질문 생성
 # ==========================
 def make_question_from_post(title, content):
     prompt = f"""
@@ -103,10 +96,6 @@ def make_question_from_post(title, content):
 """
     return gpt(prompt)
 
-
-# ==========================
-# 질문 문장 변형 (AI 안 나올 때)
-# ==========================
 def reformulate_question(original_question, attempt):
     prompt = f"""
 다음 질문을 네이버 AI 검색결과가 잘 나올 수 있게 다른 방식으로 다시 표현해줘.
@@ -117,67 +106,38 @@ def reformulate_question(original_question, attempt):
 """
     return gpt(prompt)
 
-
 # ==========================
-# 네이버 AI 검색 크롤링
+# 네이버 AI 검색 (requests + BeautifulSoup)
 # ==========================
 def crawl_naver_ai_answer(keyword):
     url = f"https://search.naver.com/search.naver?query={keyword}"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
+    }
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True, args=["--no-sandbox"])
-            page = browser.new_page()
-            page.goto(url, timeout=15000)
+        res = requests.get(url, headers=headers, timeout=10)
+        if res.status_code != 200:
+            return None
 
-            ai_div_selector = "div.R_zhtndIdtnrHycLbDdg._slog_visible"
+        soup = BeautifulSoup(res.text, "html.parser")
 
-            try:
-                page.wait_for_selector(ai_div_selector, timeout=10000)
-            except:
-                browser.close()
-                return None
+        # 네이버 AI 검색 결과의 일반 텍스트 추출
+        ai_div = soup.select_one("div.R_zhtndIdtnrHycLbDdg._slog_visible")
+        if not ai_div:
+            return None
 
-            try:
-                more_btn = page.query_selector(f"{ai_div_selector} >> button:has-text(\"더보기\")")
-                if more_btn:
-                    more_btn.click()
-            except:
-                pass
+        # a, br 태그 처리
+        for a in ai_div.select("a"):
+            a.decompose()
+        for br in ai_div.select("br"):
+            br.replace_with("\n")
 
-            time.sleep(5)
-
-            ai_div = page.query_selector(ai_div_selector)
-            if not ai_div:
-                browser.close()
-                return None
-
-            page.evaluate("""
-            (element) => {
-                element.querySelectorAll('a').forEach(a => a.remove());
-                element.querySelectorAll('br').forEach(br => br.replaceWith('\\n'));
-            }
-            """, ai_div)
-
-            text = page.evaluate("""
-            (element) => {
-                function getText(node) {
-                    if(node.nodeType === Node.TEXT_NODE) return node.textContent;
-                    return Array.from(node.childNodes).map(getText).join('');
-                }
-                return getText(element).replace(/\\n+/g, '\\n').trim();
-            }
-            """, ai_div)
-
-            browser.close()
-            return text if text else None
+        text = ai_div.get_text("\n").strip()
+        return text if text else None
     except Exception as e:
         print(f"❌ 네이버 크롤링 오류: {e}")
         return None
 
-
-# ==========================
-# AI 검색 결과 반복 시도
-# ==========================
 def get_ai_search_result_with_retries(initial_question, max_attempts=5):
     question = initial_question
     for attempt in range(1, max_attempts + 1):
@@ -191,10 +151,6 @@ def get_ai_search_result_with_retries(initial_question, max_attempts=5):
         time.sleep(2)
     return None, None
 
-
-# ==========================
-# GPT로 댓글 문장 다듬기
-# ==========================
 def polish_answer_with_gpt(question, ai_text):
     prompt = f"""
 다음은 네이버 AI 검색 결과입니다.
@@ -204,7 +160,6 @@ def polish_answer_with_gpt(question, ai_text):
 AI 결과: {ai_text}
 """
     return gpt(prompt)
-
 
 # ==========================
 # 카테고리별 봇 실행
@@ -236,24 +191,29 @@ def run_bot_for_category(category_id):
             print(f"📝 새 글 발견: {title}")
 
             with comment_lock:
-                time.sleep(5)
+                time.sleep(2)
 
                 q = make_question_from_post(title, content)
                 if not q:
                     continue
+                print(f"💬 생성된 질문: {q}")
 
                 final_q, ai_text = get_ai_search_result_with_retries(q)
                 if not ai_text:
+                    print("⚠️ AI 검색 결과 없음")
                     continue
+
+                print(f"🤖 AI 검색 결과: {ai_text}")
 
                 comment = polish_answer_with_gpt(final_q, ai_text)
                 if not comment:
                     continue
 
-                if post_comment(post_id, comment, account["username"], account["password"]):
-                    print(f"✅ 댓글 작성 성공: {comment}")
-                    time.sleep(10)
+                print(f"✍️ 최종 댓글: {comment}")
 
+                if post_comment(post_id, comment, account["username"], account["password"]):
+                    print(f"✅ 댓글 작성 성공")
+                    time.sleep(5)
 
 # ==========================
 # 메인 실행
@@ -267,4 +227,3 @@ if __name__ == "__main__":
 
     for t in threads:
         t.join()
-
